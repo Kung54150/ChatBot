@@ -230,6 +230,14 @@ function handleEvent_(ev) {
   const name = getName_(src);
   recordMessage_(chatId, src.userId || '', name, msg.type, text, ts,
     msg.id ? 'm' + msg.id : '', msg.quotedMessageId ? 'm' + msg.quotedMessageId : '', msg.quoteToken || '');
+
+  // รายงานเคสในกลุ่ม OPD1 → ร่างเคสในระบบรายงาน daily-report
+  if (msg.type === 'text') {
+    try {
+      const ack = caseDraft_(chatId, name, text, ts, msg.id ? 'm' + msg.id : '', !!msg.quotedMessageId);
+      if (ack && CASE_DRAFT.REPLY) replyText_(ev.replyToken, ack);
+    } catch (err) { console.error('caseDraft', err); }
+  }
 }
 
 /******************** บันทึกและแยกข้อมูล ********************/
@@ -1326,6 +1334,148 @@ function checklistTick_(src, data) {
     lock.releaseLock();
   }
   return checklistMessage_(m[1], role.id);
+}
+
+/******************** รายงานเคสจาก LINE → ระบบรายงาน daily-report ********************/
+/**
+ * ข้อความรายงานเคสในกลุ่ม LINE ของ OPD1 → แยกชื่อผู้ป่วย อายุ HN เวลา แพทย์ V/S เหตุการณ์ การแก้ไข
+ * แล้วบันทึกเป็น "ร่างเคส" ลงชีต 'เคสจาก LINE' ในไฟล์ Google Sheets ของ daily-report
+ * ในฟอร์มรายงานของ OPD1 กด "ดึงเคสจาก LINE" → ช่องต่าง ๆ ถูกกรอกให้ ตรวจแล้วกดบันทึก (บอทไม่เขียนลงรายงานเอง)
+ * ข้อความที่นับเป็นรายงานเคส: มีแท็ก #รายงานเคส หรือมีค่า V/S ตั้งแต่ 2 ค่าขึ้นไป
+ *   (Reply ต่อข้อความอื่นไม่นับ ยกเว้นมีแท็ก เพื่อไม่ให้การวัด V/S ซ้ำกลายเป็นเคสใหม่)
+ * Script Properties: REPORT_SHEET_ID = รหัสไฟล์ Google Sheets ของ daily-report (บัญชีที่ deploy บอทต้องแก้ไขไฟล์นั้นได้)
+ *                    CASE_CHAT       = รหัสกลุ่ม LINE ของ OPD1 (พิมพ์อะไรก็ได้ในกลุ่มแล้วดูคอลัมน์ "แชท" ในชีต Messages)
+ */
+const CASE_DRAFT = {
+  UNIT: 'OPD1',
+  SHEET: 'เคสจาก LINE',      // ต้องตรงกับ SH_LINE_CASES ใน daily-report
+  TAG: /#\s*(รายงานเคส|เคสopd)/i,
+  MIN_VITALS: 2,
+  REPLY: true,               // ตอบยืนยันในกลุ่ม (ใช้ reply ไม่เสียโควตา)
+};
+const CASE_KEYS = ['patient', 'age', 'hn', 'time', 'doctor', 'bp', 'pr', 'rr', 'temp', 'spo2', 'o2mode', 'o2flow', 'detail', 'action'];
+const CASE_SHEET_HEADER = ['messageId', 'เวลาส่ง', 'วันที่', 'หน่วยงาน', 'ผู้ส่ง (LINE)', 'ชื่อ-สกุลผู้ป่วย', 'อายุ', 'HN', 'เวลามารับบริการ',
+  'แพทย์เจ้าของไข้', 'BP (mmHg)', 'PR (/min)', 'RR (/min)', 'T (°C)', 'O2 sat (%)', 'O2', 'O2 ที่ให้', 'รายละเอียด', 'การแก้ไขเบื้องต้น',
+  'ข้อความต้นฉบับ', 'สถานะ', 'นำเข้าเมื่อ'];
+const CASE_LABELS = {
+  detail: /^(?:เหตุการณ์|รายละเอียด|อาการ(?:สำคัญ)?|ปัญหา|cc)$/i,
+  action: /^(?:แก้ไข|การแก้ไข(?:เบื้องต้น)?|การจัดการ|(?:ให้)?การพยาบาล|management|plan)$/i,
+};
+
+/** ข้อความในกลุ่ม OPD1 ที่เป็นรายงานเคส → บันทึกร่างเคสแล้วคืนข้อความตอบกลับ (ไม่ใช่รายงานเคส = null) */
+function caseDraft_(chatId, name, text, ts, msgId, isReply) {
+  if (!msgId || !prop_('REPORT_SHEET_ID') || chatId !== prop_('CASE_CHAT')) return null;
+  const tagged = CASE_DRAFT.TAG.test(text);
+  if (isReply && !tagged) return null;
+  const c = parseCaseReport_(text, ts);
+  const nVital = ['bp', 'pr', 'rr', 'temp', 'spo2'].filter(k => c[k]).length;
+  if (!tagged && nVital < CASE_DRAFT.MIN_VITALS) return null;
+
+  const sh = caseSheet_();
+  if (sh.getLastRow() > 1 && sh.getRange(2, 1, sh.getLastRow() - 1, 1).createTextFinder(msgId).matchEntireCell(true).findNext()) return null; // LINE ส่งซ้ำ
+  sh.appendRow([msgId, ts, fmtDate_(ts), CASE_DRAFT.UNIT, name].concat(CASE_KEYS.map(k => c[k]), [text, 'รอนำเข้า', '']));
+
+  const vs = [['BP', c.bp], ['P', c.pr], ['R', c.rr], ['T', c.temp], ['SpO2', c.spo2 && c.spo2 + '%']].filter(x => x[1]).map(x => x.join(' '));
+  const miss = [['patient', 'ชื่อผู้ป่วย'], ['hn', 'HN'], ['detail', 'เหตุการณ์']].filter(x => !c[x[0]]).map(x => x[1]);
+  return '📝 รับร่างรายงานเคส ' + CASE_DRAFT.UNIT + ' แล้ว' +
+    (c.hn ? '\nHN ' + c.hn : '') + '\nเวลา ' + c.time + (vs.length ? '\nV/S ' + vs.join(' · ') : '') +
+    (miss.length ? '\nยังไม่พบ: ' + miss.join(', ') + ' (กรอกเพิ่มในระบบได้)' : '') +
+    '\nเปิดระบบรายงาน > รายงานเคส > กด "ดึงเคสจาก LINE"';
+}
+
+function caseSheet_() {
+  const ss = SpreadsheetApp.openById(prop_('REPORT_SHEET_ID'));
+  let sh = ss.getSheetByName(CASE_DRAFT.SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(CASE_DRAFT.SHEET);
+    sh.appendRow(CASE_SHEET_HEADER);
+    sh.setFrozenRows(1);
+    sh.getRange(1, 1, 1, CASE_SHEET_HEADER.length).setFontWeight('bold');
+    sh.getRange('A:A').setNumberFormat('@');
+    sh.getRange('C:D').setNumberFormat('@');
+    sh.getRange('F:Q').setNumberFormat('@');   // HN / เวลา / BP เก็บเป็นข้อความ ไม่ให้ Sheets แปลงเป็นตัวเลขหรือวันที่
+  }
+  return sh;
+}
+
+/** แยกข้อมูลเคสจากข้อความพิมพ์อิสระ เช่น "ชื่อ นายสมชาย ใจดี อายุ 67 HN 123456 / V/S T 38.5 P 120 R 28 BP 90/60 O2sat 89% cannula 3 LPM" */
+function parseCaseReport_(text, ts) {
+  const t = String(text).replace(/ /g, ' ');
+  const c = {};
+  CASE_KEYS.forEach(k => { c[k] = ''; });
+  let m;
+
+  // V/S — ตัวย่อต้องไม่ติดกับตัวอักษรอังกฤษด้านหน้า (P ใน BP, R ใน PR/HR, T ใน DTX ไม่นับ)
+  const NB = '(?:^|[^A-Za-z])';
+  if ((m = t.match(/B\s*\/?\s*P\s*[:=]?\s*(\d{2,3})\s*\/\s*(\d{2,3})/i))) c.bp = m[1] + '/' + m[2];
+  if ((m = t.match(new RegExp(NB + '(?:PR|HR|P|ชีพจร)\\s*[:=]?\\s*(\\d{2,3})(?![\\d/.])', 'i')))) c.pr = m[1];
+  if ((m = t.match(new RegExp(NB + '(?:RR|R|หายใจ)\\s*[:=]?\\s*(\\d{1,2})(?![\\d/.])', 'i')))) c.rr = m[1];
+  if ((m = t.match(new RegExp(NB + '(?:BT|Temp|T|ไข้)\\s*[:=]?\\s*(\\d{2}(?:\\.\\d{1,2})?)(?![\\d/])', 'i'))) && m[1] >= 30 && m[1] <= 43) c.temp = m[1];
+  if ((m = t.match(/(?:SpO2|SpO₂|O2\s*sat(?:uration)?|sat)\s*[:=]?\s*(\d{2,3})\s*%?/i)) && m[1] <= 100) c.spo2 = m[1];
+
+  // O2: อุปกรณ์ + ปริมาณ (ค่าใน O2_MODES ของ daily-report)
+  if (/HFNC|high\s*flow/i.test(t)) c.o2mode = 'HF';
+  else if (/ET\s*tube|\bETT\b|on\s*tube/i.test(t)) c.o2mode = 'ET tube';
+  else if (/mask|แมส/i.test(t)) c.o2mode = 'Mask';
+  else if (/cannula|canula|\bNC\b|แคนนูล/i.test(t)) c.o2mode = 'Cannula';
+  else if (/\bRA\b|room\s*air/i.test(t)) c.o2mode = 'Room air';
+  if ((m = t.match(/(\d+(?:\.\d+)?)\s*(?:LPM|L\s*\/\s*min|lit(?:re|er)?s?|ลิตร)/i))) c.o2flow = m[1] + ' LPM';
+  else if ((m = t.match(/FiO2\s*[:=]?\s*(\d{2,3})\s*%?/i))) c.o2flow = 'FiO2 ' + m[1] + '%';
+  if (c.o2mode === 'Room air') c.o2flow = '';
+
+  // ผู้ป่วย
+  if ((m = t.match(/HN\s*[:.]?\s*(\d[\d\-\/]*)/i))) c.hn = m[1];
+  if ((m = t.match(/อายุ\s*[:=]?\s*(\d{1,3})\s*(ปี|เดือน|วัน)?(?:\s*(\d{1,2})\s*(เดือน|วัน))?/)) || (m = t.match(/(\d{1,3})\s*(ปี|y\/o|yo|yrs?)(?![A-Za-z])/i))) {
+    c.age = !m[2] || !/เดือน|วัน/.test(m[2]) ? (m[3] ? m[1] + ' ปี ' + m[3] + ' ' + m[4] : m[1]) : m[1] + ' ' + m[2];
+  }
+  const STOP = /^(อายุ|HN|เวลา|age|V\/S|เพศ)/i;
+  if ((m = t.match(/(?:^|\s)(?:ชื่อ(?:\s*-?\s*สกุล)?(?:ผู้ป่วย)?|(?:ผู้ป่วย|pt\.?|patient)\s*[:：])\s*[:：]?\s*([^\n]+)/im))) {
+    c.patient = m[1].split(/\s+/).filter((w, i, a) => !a.slice(0, i + 1).some(x => STOP.test(x) || /\d/.test(x))).slice(0, 4).join(' ');
+  }
+  if (!c.patient && (m = t.match(/(นางสาว|นาง|นาย|น\.ส\.|ด\.ช\.|ด\.ญ\.|เด็กชาย|เด็กหญิง)\s*([^\s\d]+)(?:\s+([^\s\d]+))?/))) {
+    c.patient = m[1] + m[2] + (m[3] && !STOP.test(m[3]) ? ' ' + m[3] : '');
+  }
+
+  // เวลา: ที่พิมพ์ว่า "เวลา 14.30" ถ้าไม่มีใช้เวลาที่ส่งข้อความ
+  if ((m = t.match(/เวลา\s*[:=]?\s*(\d{1,2})\s*[.:]\s*(\d{2})/))) {
+    if (+m[1] < 24 && +m[2] < 60) c.time = ('0' + m[1]).slice(-2) + ':' + m[2];
+  }
+  if (!c.time) c.time = fmtTime_(ts);
+
+  // แพทย์: บรรทัดที่ขึ้นต้นด้วย "แพทย์" หรือคำนำหน้า พญ./นพ./Dr.
+  if ((m = t.match(/^\s*(?:แพทย์(?:เจ้าของไข้|ผู้ตรวจ)?|doctor)\s*[:：]?\s*(.+)$/im))) c.doctor = m[1].trim();
+  else if ((m = t.match(/((?:พญ|นพ)\.\s*[^\s\d,]+(?:\s+[^\s\d,]+)?|Dr\.?\s*[A-Za-zก-๙]+)/))) c.doctor = m[1].trim();
+
+  // เหตุการณ์ / การแก้ไข: บรรทัดที่มีหัวข้อ (บรรทัดถัดไปที่ไม่มีหัวข้อต่อท้ายหัวข้อนั้น)
+  // ถ้าไม่มีหัวข้อเหตุการณ์ ใช้บรรทัดอื่นที่ไม่ใช่บรรทัดชื่อ/HN/V/S
+  const sec = { detail: [], action: [], free: [] };
+  let cur = null;
+  t.split(/\r?\n/).forEach(raw => {
+    const line = raw.replace(CASE_DRAFT.TAG, '').trim();
+    if (!line) return;
+    const lm = line.match(/^[-•*]?\s*([^:：]{1,25}?)\s*[:：]\s*(.*)$/);
+    const key = lm && Object.keys(CASE_LABELS).find(k => CASE_LABELS[k].test(lm[1].trim()));
+    if (key) { cur = key; if (lm[2]) sec[key].push(lm[2]); return; }
+    const header = /^(?:ชื่อ|ผู้ป่วย\s*[:：]|pt\.?\s*[:：]|HN|อายุ|เวลา|แพทย์|V\s*\/\s*S|vital)/i.test(line) ||
+      ['bp', 'pr', 'rr', 'temp', 'spo2'].filter(k => c[k] && line.indexOf(c[k]) >= 0).length >= 2;
+    if (cur) sec[cur].push(line);
+    else if (!header) {   // บรรทัดที่มีชื่อ/อายุ/HN ปนกับเหตุการณ์ → ตัดส่วนที่กรอกลงช่องอื่นแล้วออก
+      const rest = line.split(c.patient || '\u0000').join(' ').replace(/HN\s*[:.]?\s*\d[\d\-\/]*/i, ' ')
+        .replace(/(?:อายุ\s*[:=]?\s*)?\d{1,3}\s*(?:ปี|y\/o|yo)(?:\s*\d{1,2}\s*(?:เดือน|วัน))?/i, ' ').replace(/\s+/g, ' ').trim();
+      if (rest) sec.free.push(rest);
+    }
+  });
+  c.detail = (sec.detail.length ? sec.detail : sec.free).join('\n');
+  c.action = sec.action.join('\n');
+  if (c.o2flow && !c.o2mode) c.detail = (c.detail ? c.detail + '\n' : '') + 'O2 ' + c.o2flow + ' (ไม่ระบุอุปกรณ์)';
+  return c;
+}
+
+/** ทดสอบตัวแยกข้อความ (รันเองจากหน้า Apps Script แล้วดู Log) */
+function testCaseParse() {
+  ['#รายงานเคส\nชื่อ นายสมชาย ใจดี อายุ 67 HN 123456\nเวลา 14.30\nV/S T 38.5 P 120 R 28 BP 90/60 O2sat 89% on cannula 3 LPM\nเหตุการณ์: ผู้ป่วยหอบเหนื่อย ซึมลง\nแก้ไข: รายงานแพทย์ ให้ O2 เจาะ DTX',
+    'นางสาวมาลี ศรีสุข 45 ปี HN 2201-55 หน้ามืดหน้าห้องตรวจ 3\nBP 85/50 PR 110 RR 22 SpO2 97% RA\nให้นอนราบ ยกขาสูง รายงาน พญ.สุดา'
+  ].forEach(s => Logger.log(JSON.stringify(parseCaseReport_(s, new Date()), null, 1)));
 }
 
 /******************** LINE API ********************/
