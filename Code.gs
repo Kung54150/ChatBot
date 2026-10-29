@@ -1407,11 +1407,11 @@ function parseCaseReport_(text, ts) {
 
   // V/S — ตัวย่อต้องไม่ติดกับตัวอักษรอังกฤษด้านหน้า (P ใน BP, R ใน PR/HR, T ใน DTX ไม่นับ)
   const NB = '(?:^|[^A-Za-z])';
-  if ((m = t.match(/B\s*\/?\s*P\s*[:=]?\s*(\d{2,3})\s*\/\s*(\d{2,3})/i))) c.bp = m[1] + '/' + m[2];
-  if ((m = t.match(new RegExp(NB + '(?:PR|HR|P|ชีพจร)\\s*[:=]?\\s*(\\d{2,3})(?![\\d/.])', 'i')))) c.pr = m[1];
-  if ((m = t.match(new RegExp(NB + '(?:RR|R|หายใจ)\\s*[:=]?\\s*(\\d{1,2})(?![\\d/.])', 'i')))) c.rr = m[1];
-  if ((m = t.match(new RegExp(NB + '(?:BT|Temp|T|ไข้)\\s*[:=]?\\s*(\\d{2}(?:\\.\\d{1,2})?)(?![\\d/])', 'i'))) && m[1] >= 30 && m[1] <= 43) c.temp = m[1];
-  if ((m = t.match(/(?:SpO2|SpO₂|O2\s*sat(?:uration)?|sat)\s*[:=]?\s*(\d{2,3})\s*%?/i)) && m[1] <= 100) c.spo2 = m[1];
+  if ((m = t.match(/B\s*\/?\s*P\s*[:=.]?\s*(\d{2,3})\s*\/\s*(\d{2,3})/i))) c.bp = m[1] + '/' + m[2];
+  if ((m = t.match(new RegExp(NB + '(?:PR|HR|P|ชีพจร)\\s*[:=.]?\\s*(\\d{2,3})(?![\\d/.])', 'i')))) c.pr = m[1];
+  if ((m = t.match(new RegExp(NB + '(?:RR|R|หายใจ)\\s*[:=.]?\\s*(\\d{1,2})(?![\\d/.])', 'i')))) c.rr = m[1];
+  if ((m = t.match(new RegExp(NB + '(?:BT|Temp|T|ไข้)\\s*[:=.]?\\s*(\\d{2}(?:\\.\\d{1,2})?)(?![\\d/])', 'i'))) && m[1] >= 30 && m[1] <= 43) c.temp = m[1];
+  if ((m = t.match(/(?:SpO2|SpO₂|O2\s*sat(?:uration)?|sat)\s*[:=.]?\s*(\d{2,3})\s*%?/i)) && m[1] <= 100) c.spo2 = m[1];
 
   // O2: อุปกรณ์ + ปริมาณ (ค่าใน O2_MODES ของ daily-report)
   if (/HFNC|high\s*flow/i.test(t)) c.o2mode = 'HF';
@@ -1435,6 +1435,7 @@ function parseCaseReport_(text, ts) {
   if (!c.patient && (m = t.match(/(นางสาว|นาง|นาย|น\.ส\.|ด\.ช\.|ด\.ญ\.|เด็กชาย|เด็กหญิง)\s*([^\s\d]+)(?:\s+([^\s\d]+))?/))) {
     c.patient = m[1] + m[2] + (m[3] && !STOP.test(m[3]) ? ' ' + m[3] : '');
   }
+  if (!c.patient && (m = t.match(/\b(Mr|Mrs|Ms|Miss)\.?\s*([A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3})/))) c.patient = m[1] + '.' + m[2];
 
   // เวลา: ที่พิมพ์ว่า "เวลา 14.30" ถ้าไม่มีใช้เวลาที่ส่งข้อความ
   if ((m = t.match(/เวลา\s*[:=]?\s*(\d{1,2})\s*[.:]\s*(\d{2})/))) {
@@ -1442,9 +1443,10 @@ function parseCaseReport_(text, ts) {
   }
   if (!c.time) c.time = fmtTime_(ts);
 
-  // แพทย์: บรรทัดที่ขึ้นต้นด้วย "แพทย์" หรือคำนำหน้า พญ./นพ./Dr.
-  if ((m = t.match(/^\s*(?:แพทย์(?:เจ้าของไข้|ผู้ตรวจ)?|doctor)\s*[:：]?\s*(.+)$/im))) c.doctor = m[1].trim();
+  // แพทย์: "แพทย์: ชื่อ" / "แพทย์เจ้าของไข้ ชื่อ" / คำนำหน้า พญ./นพ./Dr. / "พบแพทย์ชื่อ"
+  if ((m = t.match(/^\s*(?:แพทย์\s*[:：]|แพทย์(?:เจ้าของไข้|ผู้ตรวจ)\s*[:：]?|doctor\s*[:：])\s*(.+)$/im))) c.doctor = m[1].trim();
   else if ((m = t.match(/((?:พญ|นพ)\.\s*[^\s\d,]+(?:\s+[^\s\d,]+)?|Dr\.?\s*[A-Za-zก-๙]+)/))) c.doctor = m[1].trim();
+  else if ((m = t.match(/พบแพทย์\s*([ก-๙]{2,})/)) && !/^(ตาม|อีก|ที่|ซ้ำ|ใหม่|เพื่อ|และ|แล้ว|ด้วย|เวร)/.test(m[1])) c.doctor = m[1];
 
   // เหตุการณ์ / การแก้ไข: บรรทัดที่มีหัวข้อ (บรรทัดถัดไปที่ไม่มีหัวข้อต่อท้ายหัวข้อนั้น)
   // ถ้าไม่มีหัวข้อเหตุการณ์ ใช้บรรทัดอื่นที่ไม่ใช่บรรทัดชื่อ/HN/V/S
@@ -1456,14 +1458,12 @@ function parseCaseReport_(text, ts) {
     const lm = line.match(/^[-•*]?\s*([^:：]{1,25}?)\s*[:：]\s*(.*)$/);
     const key = lm && Object.keys(CASE_LABELS).find(k => CASE_LABELS[k].test(lm[1].trim()));
     if (key) { cur = key; if (lm[2]) sec[key].push(lm[2]); return; }
-    const header = /^(?:ชื่อ|ผู้ป่วย\s*[:：]|pt\.?\s*[:：]|HN|อายุ|เวลา|แพทย์|V\s*\/\s*S|vital)/i.test(line) ||
-      ['bp', 'pr', 'rr', 'temp', 'spo2'].filter(k => c[k] && line.indexOf(c[k]) >= 0).length >= 2;
-    if (cur) sec[cur].push(line);
-    else if (!header) {   // บรรทัดที่มีชื่อ/อายุ/HN ปนกับเหตุการณ์ → ตัดส่วนที่กรอกลงช่องอื่นแล้วออก
-      const rest = line.split(c.patient || '\u0000').join(' ').replace(/HN\s*[:.]?\s*\d[\d\-\/]*/i, ' ')
-        .replace(/(?:อายุ\s*[:=]?\s*)?\d{1,3}\s*(?:ปี|y\/o|yo)(?:\s*\d{1,2}\s*(?:เดือน|วัน))?/i, ' ').replace(/\s+/g, ' ').trim();
-      if (rest) sec.free.push(rest);
-    }
+    if (cur) { sec[cur].push(line); return; }
+    // ตัดชื่อ/อายุ/HN ที่กรอกลงช่องอื่นแล้วออก; บรรทัดที่เหลือแต่หัวข้อหรือค่า V/S (เช่น "V/S T 37 P 88") ไม่นำมาเป็นรายละเอียด
+    const rest = line.split(c.patient || '\u0000').join(' ').replace(/HN\s*[:.]?\s*\d[\d\-\/]*/i, ' ')
+      .replace(/(?:อายุ\s*[:=]?\s*)?\d{1,3}\s*(?:ปี|y\/o|yo)(?:\s*\d{1,2}\s*(?:เดือน|วัน))?/i, ' ').replace(/\s+/g, ' ').trim();
+    const bare = rest.replace(/(?:ชื่อ(?:\s*-?\s*สกุล)?|ผู้ป่วย|pt\.?|เวลา|แพทย์(?:เจ้าของไข้)?|V\s*\/\s*S|vital\s*signs?|แรกรับ|BP|B\/P|PR|HR|RR|BT|Temp|SpO2|O2\s*sat|on|cannula|mask|RA|room\s*air|LPM|[PRT]|[\d.\/%:=,\s-])/gi, '');
+    if (bare.length >= 4) sec.free.push(rest);
   });
   c.detail = (sec.detail.length ? sec.detail : sec.free).join('\n');
   c.action = sec.action.join('\n');
