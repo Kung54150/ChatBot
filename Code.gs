@@ -1364,7 +1364,7 @@ const CASE_LABELS = {
 
 /** ข้อความในกลุ่ม OPD1 ที่เป็นรายงานเคส → บันทึกร่างเคสแล้วคืนข้อความตอบกลับ (ไม่ใช่รายงานเคส = null) */
 function caseDraft_(chatId, name, text, ts, msgId, isReply) {
-  if (!msgId || !prop_('REPORT_SHEET_ID') || chatId !== prop_('CASE_CHAT')) return null;
+  if (!msgId || !reportSheetId_() || chatId !== String(prop_('CASE_CHAT') || '').trim()) return null;
   const tagged = CASE_DRAFT.TAG.test(text);
   if (isReply && !tagged) return null;
   const c = parseCaseReport_(text, ts);
@@ -1384,7 +1384,7 @@ function caseDraft_(chatId, name, text, ts, msgId, isReply) {
 }
 
 function caseSheet_() {
-  const ss = SpreadsheetApp.openById(prop_('REPORT_SHEET_ID'));
+  const ss = SpreadsheetApp.openById(reportSheetId_());
   let sh = ss.getSheetByName(CASE_DRAFT.SHEET);
   if (!sh) {
     sh = ss.insertSheet(CASE_DRAFT.SHEET);
@@ -1396,6 +1396,13 @@ function caseSheet_() {
     sh.getRange('F:Q').setNumberFormat('@');   // HN / เวลา / BP เก็บเป็นข้อความ ไม่ให้ Sheets แปลงเป็นตัวเลขหรือวันที่
   }
   return sh;
+}
+
+// รับได้ทั้งรหัสไฟล์ และ URL ทั้งบรรทัดที่วางมา (ตัดช่องว่างหัวท้ายให้)
+function reportSheetId_() {
+  const v = String(prop_('REPORT_SHEET_ID') || '').trim();
+  const m = v.match(/\/d\/([\w-]+)/);
+  return m ? m[1] : v;
 }
 
 /** แยกข้อมูลเคสจากข้อความพิมพ์อิสระ เช่น "ชื่อ นายสมชาย ใจดี อายุ 67 HN 123456 / V/S T 38.5 P 120 R 28 BP 90/60 O2sat 89% cannula 3 LPM" */
@@ -1469,6 +1476,42 @@ function parseCaseReport_(text, ts) {
   c.action = sec.action.join('\n');
   if (c.o2flow && !c.o2mode) c.detail = (c.detail ? c.detail + '\n' : '') + 'O2 ' + c.o2flow + ' (ไม่ระบุอุปกรณ์)';
   return c;
+}
+
+/**
+ * ตรวจการตั้งค่ารายงานเคสจาก LINE: รันเองจากหน้า Apps Script แล้วดู Log
+ * รันครั้งแรกจะมีหน้าต่างขออนุญาตเปิดไฟล์ของระบบรายงาน ให้กดอนุญาต (บอทขอเองตอนรับข้อความ LINE ไม่ได้)
+ */
+function checkCaseSetup() {
+  const out = [];
+  const ok = (good, msg) => out.push((good ? '✅ ' : '❌ ') + msg);
+  const chat = String(prop_('CASE_CHAT') || '').trim(), sheetId = reportSheetId_();
+  ok(!!prop_('LINE_TOKEN'), 'LINE_TOKEN');
+  ok(!!chat, 'CASE_CHAT = ' + (chat || '(ยังไม่ได้ตั้ง)'));
+  if (chat) ok(isAllowed_(chat), 'CASE_CHAT อยู่ใน ALLOWED_CHATS (หรือ ALLOWED_CHATS ว่าง)');
+  ok(!!sheetId, 'REPORT_SHEET_ID = ' + (sheetId || '(ยังไม่ได้ตั้ง)'));
+  if (sheetId) {
+    try {
+      ok(true, 'เปิดไฟล์ระบบรายงานได้: ' + SpreadsheetApp.openById(sheetId).getName());
+      caseSheet_();
+      ok(true, 'ชีต "' + CASE_DRAFT.SHEET + '" พร้อมใช้');
+    } catch (e) { ok(false, 'เปิดไฟล์ระบบรายงานไม่ได้: ' + e.message); }
+  }
+  // ข้อความล่าสุดที่บอทได้รับ: มาจากกลุ่มไหน และเข้าเงื่อนไขรายงานเคสหรือไม่
+  const rows = readRows_('Messages').slice(-300).reverse();
+  if (!rows.length) ok(false, 'ชีต Messages ยังไม่มีข้อความ — บอทยังไม่ได้รับข้อความจาก LINE (ตรวจ Webhook URL / Deploy)');
+  else out.push('ข้อความล่าสุดที่บอทได้รับ: ' + rows[0][0] + ' จากแชท ' + rows[0][2]);
+  const last = rows.find(r => r[5] === 'text' && (CASE_DRAFT.TAG.test(r[6]) || /BP|V\s*\/\s*S/i.test(r[6])));
+  if (last) {
+    const c = parseCaseReport_(last[6], new Date(last[0]));
+    const nVital = ['bp', 'pr', 'rr', 'temp', 'spo2'].filter(k => c[k]).length;
+    out.push('ข้อความรายงานเคสล่าสุด (' + last[0] + '):');
+    ok(String(last[2]) === chat, 'มาจากกลุ่ม ' + last[2] + (String(last[2]) === chat ? ' ตรงกับ CASE_CHAT' : ' ไม่ตรงกับ CASE_CHAT'));
+    ok(!last[9] || CASE_DRAFT.TAG.test(last[6]), 'ไม่ใช่การ Reply ต่อข้อความอื่น (หรือมีแท็ก #รายงานเคส)');
+    ok(CASE_DRAFT.TAG.test(last[6]) || nVital >= CASE_DRAFT.MIN_VITALS, 'มีแท็ก #รายงานเคส หรือมีค่า V/S ' + nVital + ' ค่า');
+    out.push('ผลแยกข้อความ: ' + JSON.stringify(c));
+  }
+  Logger.log(out.join('\n'));
 }
 
 /** ทดสอบตัวแยกข้อความ (รันเองจากหน้า Apps Script แล้วดู Log) */
