@@ -134,6 +134,7 @@ const SHEETS = {
   Incidents: ['เวลา', 'วันที่', 'แชท', 'ผู้รายงาน', 'ระดับ', 'เหตุการณ์', 'การจัดการ', 'ที่มา', 'messageId'],
   Dept: ['เวลา', 'วันที่รายงาน', 'แชท', 'ผู้รายงาน', 'แผนก', 'หน่วย', 'Total', 'กลุ่ม', 'รายการ', 'จำนวน', 'ปิดแผนก'],
   Summary: ['วันที่', 'แชท', 'สรุป', 'สร้างเมื่อ'],
+  ChecklistLog: ['เวลา', 'วันที่', 'เวร', 'ลำดับ', 'รายการ', 'ผู้กด', 'userId'],
 };
 
 /******************** ติดตั้ง (รันครั้งเดียว) ********************/
@@ -148,6 +149,7 @@ function setup() {
     sh.getRange('B:C').setNumberFormat('@'); // วันที่/แชท เก็บเป็นข้อความ
   });
   setupTrigger();
+  setupChecklistTrigger();
 }
 
 function setupSheetsOnly_() {
@@ -192,6 +194,12 @@ function handleEvent_(ev) {
       '\nพิมพ์ "สรุป" เพื่อดูสรุปของวันนี้');
     return;
   }
+  // ติ๊กรายการเช็คลิสต์ประจำวัน
+  if (ev.type === 'postback' && isAllowed_(chatId) && String(ev.postback.data || '').indexOf('ck=') === 0) {
+    const card = checklistTick_(src, ev.postback.data);
+    if (card) replyMessages_(ev.replyToken, [card]);
+    return;
+  }
   // กดปุ่มบนการ์ด → ตอบกลับโดยอ้างถึงข้อความล่าสุดของเรื่อง (แตะที่ข้อความอ้างถึงเพื่อเลื่อนไปยังตำแหน่งนั้นในแชท)
   if (ev.type === 'postback' && isAllowed_(chatId)) {
     const m = String(ev.postback.data || '').match(/^jump=(m\d+)$/);
@@ -203,6 +211,12 @@ function handleEvent_(ev) {
   const msg = ev.message;
   const text = msg.type === 'text' ? msg.text : '[' + msg.type + ']';
   const ts = new Date(ev.timestamp);
+
+  // พิมพ์ "เช็คลิสต์" → แสดงเช็คลิสต์วันนี้พร้อมสถานะ (ติ๊กต่อได้)
+  if (msg.type === 'text' && CHECKLIST_WORDS.includes(text.trim().toLowerCase())) {
+    replyMessages_(ev.replyToken, [checklistMessage_(fmtDate_(ts))]);
+    return;
+  }
 
   // คำสั่งขอสรุป → ตอบกลับด้วย reply (ไม่เสียโควตา)
   const cmd = msg.type === 'text' && parseCommand_(text, fmtDate_(ts));
@@ -692,6 +706,8 @@ function helpText_() {
     '        สรุป แพ้ยา 1/09/69-19/09/69',
     '        สรุป ผู้สูงอายุ เดือนกรกฎาคม 2569',
     '',
+    'เช็คลิสต์ – แสดงเช็คลิสต์ประจำวัน กดติ๊กรายการที่ทำแล้ว',
+    '',
     'งานติดตาม (การ์ด 1 ใบต่อ 1 เคส)',
     'สรุป prefax – Pre fax / รอประกันตอบกลับ / ตอบกลับ-อนุมัติ / OR แล้ว',
     'สรุป sleep test – นัดทำ / ทำแล้ว',
@@ -1177,6 +1193,136 @@ function listDays_(from, to) {
 function round1_(x) { return Math.round(x * 10) / 10; }
 function clipMsg_(text) {
   return text.length > CONFIG.MAX_LEN ? text.slice(0, CONFIG.MAX_LEN - 40) + '\n...(ตัดทอน ดูฉบับเต็มในชีต)' : text;
+}
+
+/******************** เช็คลิสต์ประจำวัน ********************/
+/**
+ * ทุกวันบอทส่งการ์ดเช็คลิสต์เข้ากลุ่ม LINE ตามเวลาเข้าเวร (hour ของแต่ละเวร: 06:00 = NA1, 07:00 = NA2-NA4)
+ * เจ้าหน้าที่กดที่รายการเพื่อติ๊กว่าทำแล้ว → บันทึกลงชีต ChecklistLog และบอทตอบการ์ดเวรนั้นที่อัปเดตแล้ว
+ * ตั้งค่า: Script property CHECKLIST_CHAT = รหัสกลุ่มที่จะส่ง (ถ้าไม่ตั้ง ใช้ ALLOWED_CHATS ตัวแรก)
+ * แก้รายการได้ที่ CHECKLIST ด้านล่าง ถ้าเปลี่ยนชั่วโมง (hour) ต้องแก้ checklistAt6/checklistAt7 ให้ตรงและรัน setupChecklistTrigger()
+ */
+const CHECKLIST_WORDS = ['เช็คลิสต์', 'เช็คลิส', 'checklist'];
+const CHECKLIST = [
+  { id: 'NA1', hour: 6, title: 'เวร 6.00น NA1', items: [
+    'เปิดไฟ เปิดแอร์',
+    'เปิดห้องตรวจ เช็คความพร้อมใช้ทุกจุด',
+    'ติดป้ายหน้าห้องตรวจ',
+    'เปิดคอมพิวเตอร์ทุกจุด',
+    'เตรียมห้อง V/S',
+    'เตรียมความพร้อมห้อง 3',
+    'EKG, เป่าปอด, รถ Emer วางในจุดพร้อมใช้',
+    'เตรียมแฟ้มนัด',
+  ] },
+  { id: 'NA2', hour: 7, title: 'เวร 7.00น NA2', items: [
+    'แลกของ Sterile',
+    'เปลี่ยนถุงผ้า',
+    'เบิกผ้า',
+    'เข้าเคส',
+  ] },
+  { id: 'NA3', hour: 7, title: 'เวร 7.00น NA3', items: [
+    'พิมพ์อัตรากำลัง ประจำคอม ช่วยรับคนไข้',
+    'เปิดไฟ เปิดแอร์ เวลา 7.00น',
+  ] },
+  { id: 'NA4', hour: 7, title: 'เวร 7.00น NA4', items: [
+    'ช่วยรับคนไข้ + เข้าเคส',
+  ] },
+];
+
+function setupChecklistTrigger() {
+  const handlers = ['dailyChecklist', 'checklistAt6', 'checklistAt7'];
+  ScriptApp.getProjectTriggers()
+    .filter(t => handlers.includes(t.getHandlerFunction()))
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  [['checklistAt6', 6], ['checklistAt7', 7]].forEach(([fn, hour]) =>
+    ScriptApp.newTrigger(fn).timeBased().atHour(hour).everyDays(1).inTimezone(CONFIG.TZ).create());
+}
+function checklistAt6() { dailyChecklist(6); }
+function checklistAt7() { dailyChecklist(7); }
+
+function checklistChat_() {
+  return prop_('CHECKLIST_CHAT') ||
+    (prop_('ALLOWED_CHATS') || '').split(',').map(s => s.trim()).filter(String)[0] || '';
+}
+
+/** ส่งเช็คลิสต์ของวันนี้เข้ากลุ่ม เฉพาะเวรที่เข้าเวรชั่วโมง hour (ไม่ระบุ = ทุกเวร ใช้ทดสอบมือ) */
+function dailyChecklist(hour) {
+  const to = checklistChat_();
+  if (!to) { console.error('ยังไม่ได้ตั้ง CHECKLIST_CHAT / ALLOWED_CHATS'); return; }
+  lineApi_('/v2/bot/message/push', { to, messages: [checklistMessage_(fmtDate_(new Date()), null, hour)] });
+}
+
+/** ตัวแปรสถานะ: { 'NA1|0': [ชื่อ, เวลา], ... } ของวันที่ระบุ */
+function checklistDone_(date) {
+  const done = {};
+  readRows_('ChecklistLog').forEach(r => {
+    if (dateStr_(r[1]) === date) done[r[2] + '|' + (Number(r[3]) - 1)] = [String(r[5]), fmtTime_(r[0])];
+  });
+  return done;
+}
+
+/** การ์ด Flex: ไม่ระบุ roleId = ทุกเวร (carousel), ระบุ = เวรนั้นเวรเดียว; hour = เฉพาะเวรที่เข้าเวรชั่วโมงนั้น */
+function checklistMessage_(date, roleId, hour) {
+  const done = checklistDone_(date);
+  const roles = CHECKLIST.filter(r => (!roleId || r.id === roleId) && (!hour || r.hour === hour));
+  const bubbles = roles.map(r => checklistBubble_(r, date, done));
+  const total = roles.reduce((n, r) => n + r.items.length, 0);
+  const count = Object.keys(done).filter(k => roles.some(r => k.indexOf(r.id + '|') === 0)).length;
+  return {
+    type: 'flex',
+    altText: 'เช็คลิสต์ประจำวัน ' + thaiDate_(date) + ' (' + count + '/' + total + ')',
+    contents: bubbles.length === 1 ? bubbles[0] : { type: 'carousel', contents: bubbles },
+  };
+}
+
+function checklistBubble_(role, date, done) {
+  const n = role.items.filter((_, i) => done[role.id + '|' + i]).length;
+  const rows = role.items.map((it, i) => {
+    const d = done[role.id + '|' + i];
+    const text = [{ type: 'text', text: it, wrap: true, size: 'sm',
+      color: d ? '#999999' : '#111111', decoration: d ? 'line-through' : 'none' }];
+    if (d) text.push({ type: 'text', text: d[0] + (d[1] ? ' · ' + d[1] : ''), size: 'xxs', color: '#999999' });
+    return {
+      type: 'box', layout: 'horizontal', spacing: 'md', paddingAll: '6px',
+      action: { type: 'postback', label: 'ติ๊ก', data: 'ck=' + date + '|' + role.id + '|' + i },
+      contents: [
+        { type: 'text', text: d ? '☑' : '☐', flex: 0, size: 'lg', color: d ? '#1DB446' : '#555555' },
+        { type: 'box', layout: 'vertical', flex: 1, contents: text },
+      ],
+    };
+  });
+  return {
+    type: 'bubble', size: 'mega',
+    header: { type: 'box', layout: 'vertical', backgroundColor: n === role.items.length ? '#1DB446' : '#06C755',
+      contents: [
+        { type: 'text', text: role.title, weight: 'bold', color: '#FFFFFF' },
+        { type: 'text', text: 'เช็คลิสต์ ' + thaiDate_(date), size: 'xs', color: '#FFFFFF' },
+      ] },
+    body: { type: 'box', layout: 'vertical', spacing: 'xs', contents: rows },
+    footer: { type: 'box', layout: 'vertical', contents: [
+      { type: 'text', text: 'ทำแล้ว ' + n + '/' + role.items.length + (n === role.items.length ? ' ✅' : ''),
+        size: 'xs', color: '#666666', align: 'center' },
+    ] },
+  };
+}
+
+/** กดติ๊ก: บันทึก (ถ้ายังไม่เคยติ๊ก) แล้วคืนการ์ดเวรนั้นที่อัปเดตแล้ว; ข้อมูลไม่ถูกต้อง = null */
+function checklistTick_(src, data) {
+  const m = String(data).match(/^ck=(\d{4}-\d{2}-\d{2})\|(\w+)\|(\d+)$/);
+  if (!m) return null;
+  const role = CHECKLIST.find(r => r.id === m[2]);
+  const idx = Number(m[3]);
+  if (!role || !role.items[idx]) return null;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    if (!checklistDone_(m[1])[role.id + '|' + idx]) {
+      append_('ChecklistLog', [new Date(), m[1], role.id, idx + 1, role.items[idx], getName_(src), src.userId || '']);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  return checklistMessage_(m[1], role.id);
 }
 
 /******************** LINE API ********************/
