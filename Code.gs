@@ -1197,15 +1197,14 @@ function clipMsg_(text) {
 
 /******************** เช็คลิสต์ประจำวัน ********************/
 /**
- * ทุกวันเวลา CHECKLIST_HOUR บอทส่งการ์ดเช็คลิสต์แยกตามเวรเข้ากลุ่ม LINE
+ * ทุกวันบอทส่งการ์ดเช็คลิสต์เข้ากลุ่ม LINE ตามเวลาเข้าเวร (hour ของแต่ละเวร: 06:00 = NA1, 07:00 = NA2-NA4)
  * เจ้าหน้าที่กดที่รายการเพื่อติ๊กว่าทำแล้ว → บันทึกลงชีต ChecklistLog และบอทตอบการ์ดเวรนั้นที่อัปเดตแล้ว
  * ตั้งค่า: Script property CHECKLIST_CHAT = รหัสกลุ่มที่จะส่ง (ถ้าไม่ตั้ง ใช้ ALLOWED_CHATS ตัวแรก)
- * แก้รายการได้ที่ CHECKLIST ด้านล่าง แล้วรัน setupChecklistTrigger() ถ้าเปลี่ยนเวลา
+ * แก้รายการได้ที่ CHECKLIST ด้านล่าง ถ้าเปลี่ยนชั่วโมง (hour) ต้องแก้ checklistAt6/checklistAt7 ให้ตรงและรัน setupChecklistTrigger()
  */
-const CHECKLIST_HOUR = 6;
 const CHECKLIST_WORDS = ['เช็คลิสต์', 'เช็คลิส', 'checklist'];
 const CHECKLIST = [
-  { id: 'NA1', title: 'เวร 6.00น NA1', items: [
+  { id: 'NA1', hour: 6, title: 'เวร 6.00น NA1', items: [
     'เปิดไฟ เปิดแอร์',
     'เปิดห้องตรวจ เช็คความพร้อมใช้ทุกจุด',
     'ติดป้ายหน้าห้องตรวจ',
@@ -1215,39 +1214,42 @@ const CHECKLIST = [
     'EKG, เป่าปอด, รถ Emer วางในจุดพร้อมใช้',
     'เตรียมแฟ้มนัด',
   ] },
-  { id: 'NA2', title: 'เวร 7.00น NA2', items: [
+  { id: 'NA2', hour: 7, title: 'เวร 7.00น NA2', items: [
     'แลกของ Sterile',
     'เปลี่ยนถุงผ้า',
     'เบิกผ้า',
     'เข้าเคส',
   ] },
-  { id: 'NA3', title: 'เวร 7.00น NA3', items: [
+  { id: 'NA3', hour: 7, title: 'เวร 7.00น NA3', items: [
     'พิมพ์อัตรากำลัง ประจำคอม ช่วยรับคนไข้',
     'เปิดไฟ เปิดแอร์ เวลา 7.00น',
   ] },
-  { id: 'NA4', title: 'เวร 7.00น NA4', items: [
+  { id: 'NA4', hour: 7, title: 'เวร 7.00น NA4', items: [
     'ช่วยรับคนไข้ + เข้าเคส',
   ] },
 ];
 
 function setupChecklistTrigger() {
+  const handlers = ['dailyChecklist', 'checklistAt6', 'checklistAt7'];
   ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'dailyChecklist')
+    .filter(t => handlers.includes(t.getHandlerFunction()))
     .forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('dailyChecklist').timeBased()
-    .atHour(CHECKLIST_HOUR).everyDays(1).inTimezone(CONFIG.TZ).create();
+  [['checklistAt6', 6], ['checklistAt7', 7]].forEach(([fn, hour]) =>
+    ScriptApp.newTrigger(fn).timeBased().atHour(hour).everyDays(1).inTimezone(CONFIG.TZ).create());
 }
+function checklistAt6() { dailyChecklist(6); }
+function checklistAt7() { dailyChecklist(7); }
 
 function checklistChat_() {
   return prop_('CHECKLIST_CHAT') ||
     (prop_('ALLOWED_CHATS') || '').split(',').map(s => s.trim()).filter(String)[0] || '';
 }
 
-/** เรียกโดย trigger ทุกวัน: ส่งเช็คลิสต์ของวันนี้เข้ากลุ่ม */
-function dailyChecklist() {
+/** ส่งเช็คลิสต์ของวันนี้เข้ากลุ่ม เฉพาะเวรที่เข้าเวรชั่วโมง hour (ไม่ระบุ = ทุกเวร ใช้ทดสอบมือ) */
+function dailyChecklist(hour) {
   const to = checklistChat_();
   if (!to) { console.error('ยังไม่ได้ตั้ง CHECKLIST_CHAT / ALLOWED_CHATS'); return; }
-  lineApi_('/v2/bot/message/push', { to, messages: [checklistMessage_(fmtDate_(new Date()))] });
+  lineApi_('/v2/bot/message/push', { to, messages: [checklistMessage_(fmtDate_(new Date()), null, hour)] });
 }
 
 /** ตัวแปรสถานะ: { 'NA1|0': [ชื่อ, เวลา], ... } ของวันที่ระบุ */
@@ -1259,10 +1261,10 @@ function checklistDone_(date) {
   return done;
 }
 
-/** การ์ด Flex: ไม่ระบุ roleId = ทุกเวร (carousel), ระบุ = เวรนั้นเวรเดียว */
-function checklistMessage_(date, roleId) {
+/** การ์ด Flex: ไม่ระบุ roleId = ทุกเวร (carousel), ระบุ = เวรนั้นเวรเดียว; hour = เฉพาะเวรที่เข้าเวรชั่วโมงนั้น */
+function checklistMessage_(date, roleId, hour) {
   const done = checklistDone_(date);
-  const roles = CHECKLIST.filter(r => !roleId || r.id === roleId);
+  const roles = CHECKLIST.filter(r => (!roleId || r.id === roleId) && (!hour || r.hour === hour));
   const bubbles = roles.map(r => checklistBubble_(r, date, done));
   const total = roles.reduce((n, r) => n + r.items.length, 0);
   const count = Object.keys(done).filter(k => roles.some(r => k.indexOf(r.id + '|') === 0)).length;
