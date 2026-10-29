@@ -1203,6 +1203,7 @@ function clipMsg_(text) {
  * แก้รายการได้ที่ CHECKLIST ด้านล่าง ถ้าเปลี่ยนชั่วโมง (hour) ต้องแก้ checklistAt6/checklistAt7 ให้ตรงและรัน setupChecklistTrigger()
  */
 const CHECKLIST_WORDS = ['เช็คลิสต์', 'เช็คลิส', 'checklist'];
+const CHECKLIST_START = '2026-11-01';   // เริ่มส่งตั้งแต่วันที่นี้ (1 พ.ย. 2569) ก่อนหน้านั้นไม่ส่ง
 const CHECKLIST = [
   { id: 'NA1', hour: 6, title: 'เวร 6.00น NA1', items: [
     'เปิดไฟ เปิดแอร์',
@@ -1248,8 +1249,10 @@ function checklistChat_() {
 /** ส่งเช็คลิสต์ของวันนี้เข้ากลุ่ม เฉพาะเวรที่เข้าเวรชั่วโมง hour (ไม่ระบุ = ทุกเวร ใช้ทดสอบมือ) */
 function dailyChecklist(hour) {
   const to = checklistChat_();
+  const today = fmtDate_(new Date());
+  if (hour && today < CHECKLIST_START) return;   // trigger รายวัน: ยังไม่ถึงวันเริ่ม (รันมือแบบไม่ใส่ hour ยังส่งได้)
   if (!to) { console.error('ยังไม่ได้ตั้ง CHECKLIST_CHAT / ALLOWED_CHATS'); return; }
-  lineApi_('/v2/bot/message/push', { to, messages: [checklistMessage_(fmtDate_(new Date()), null, hour)] });
+  lineApi_('/v2/bot/message/push', { to, messages: [checklistMessage_(today, null, hour)] });
 }
 
 /** ตัวแปรสถานะ: { 'NA1|0': [ชื่อ, เวลา], ... } ของวันที่ระบุ */
