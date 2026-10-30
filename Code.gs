@@ -196,8 +196,7 @@ function handleEvent_(ev) {
   }
   // ติ๊กรายการเช็คลิสต์ประจำวัน
   if (ev.type === 'postback' && isAllowed_(chatId) && String(ev.postback.data || '').indexOf('ck=') === 0) {
-    const card = checklistTick_(src, ev.postback.data);
-    if (card) replyMessages_(ev.replyToken, [card]);
+    checklistTick_(src, ev.postback.data);   // บันทึกเงียบๆ ไม่ตอบในกลุ่ม; ดูสถานะโดยพิมพ์ "เช็คลิสต์"
     return;
   }
   // กดปุ่มบนการ์ด → ตอบกลับโดยอ้างถึงข้อความล่าสุดของเรื่อง (แตะที่ข้อความอ้างถึงเพื่อเลื่อนไปยังตำแหน่งนั้นในแชท)
@@ -1206,7 +1205,7 @@ function clipMsg_(text) {
 /******************** เช็คลิสต์ประจำวัน ********************/
 /**
  * ทุกวันบอทส่งการ์ดเช็คลิสต์เข้ากลุ่ม LINE ตามเวลาเข้าเวร (hour ของแต่ละเวร: 06:00 = NA1, 07:00 = NA2-NA4)
- * เจ้าหน้าที่กดที่รายการเพื่อติ๊กว่าทำแล้ว → บันทึกลงชีต ChecklistLog และบอทตอบการ์ดเวรนั้นที่อัปเดตแล้ว
+ * เจ้าหน้าที่กดที่รายการเพื่อติ๊กว่าทำแล้ว → บันทึกลงชีต ChecklistLog (บอทไม่ตอบในกลุ่ม เพื่อไม่ให้แจ้งเตือนซ้ำ; พิมพ์ "เช็คลิสต์" เพื่อดูสถานะ)
  * ตั้งค่า: Script property CHECKLIST_CHAT = รหัสกลุ่มที่จะส่ง (ถ้าไม่ตั้ง ใช้ ALLOWED_CHATS ตัวแรก)
  * แก้รายการได้ที่ CHECKLIST ด้านล่าง ถ้าเปลี่ยนชั่วโมง (hour) ต้องแก้ checklistAt6/checklistAt7 ให้ตรงและรัน setupChecklistTrigger()
  */
